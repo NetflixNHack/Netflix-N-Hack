@@ -5,6 +5,7 @@ Inject custom JavaScript into the Netflix PS5 error screen by intercepting Netfl
 PS5 firmware version: 4.03-12.XX
 
 Lowest working version: https://prosperopatches.com/PPSA01614?v=05.000.000 (Needs to be properly merged) 
+
 **Recommended download link merged 6.00:** https://pkg-zone.com/details/PPSA01615
 
 > This project uses a local MITM proxy to inject and execute `inject.js` on the Netflix error page
