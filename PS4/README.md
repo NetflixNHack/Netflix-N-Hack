@@ -7,7 +7,7 @@
 
 Before you proceed, please ensure you meet these criteria 
 
-1. Netflix install on your PS4 below the latest version 
+1. Netflix installed on your PS4 below the latest version 
     - If you have existing Jailbreak, you can just install the vulnerable version.
     - this is useful if you can't afford BD-JB or are stuck using PPPwn 
     - if you are on latest firmware, you can downgrade via mitm by downloading from PSN. You cannot jailbreak, however you will be prepared for if a new kernel exploit comes out .
