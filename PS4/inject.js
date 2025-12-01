@@ -260,7 +260,7 @@ class gadgets {
                     this.pop_rsp_pop_rbp = 0x17ecb4en;
                     this.mov_qword_ptr_rdi_rax = 0x1dcba9n;
                     break;
-                    
+                case 'Pollux-U53-7-J':    
                 case 'Pollux-U53-7-E':        // PS4 EU 1.53
                     is_ps4 = true;
                     /** Gadgets for Function Arguments (EBOOT) **/
@@ -1060,7 +1060,7 @@ function main () {
 
         // longjmp and setjmp addresses from eboot GOT (global for payloads)
         if (is_us) {
-            longjmp_addr = read64_uncompressed(eboot_base + 0x26aacd0n);
+            longjmp_addr = read64_uncompressed(eboot_base + 0x26aacd0n); // or 0x26aacd0n 
             setjmp_addr = read64_uncompressed(eboot_base + 0x26aacc8n);
         } else {
             longjmp_addr = read64_uncompressed(eboot_base + 0x26ac490n);
@@ -1544,6 +1544,6 @@ function main () {
         logger.flush();
     }
 }
-
-ws.init("192.168.0.111", 1337, main);// uncomment this to enable WebSocket logging
+    ws.init("192.168.0.111", 1337, main);// uncomment this to enable WebSocket logging
 //main();
+

