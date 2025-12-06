@@ -26,8 +26,12 @@ Need help? Ask me on [Discord](https://discord.gg/QMGHzzW89V)
 - mitmproxy
 - Internet access
 
+> [!Warning]
+> Downgrading is experimental and may not work for you. If you accidentally update to 1.59 you cannot downgrade with MITM. **Extended storage images are planned**
+
 > [!NOTE]
-> please make sure you do this correctly. Backup restore will not backup licenses. Downgrade at your own risk!
+> please make sure you do this correctly. Backup restore will not backup licenses. Downgrade at your own risk!. if you accidentally upgrade to 1.59, you cannot downgrade without existing jailbreak
+> 
 
 ### Install & Run Downgrade Proxy
 ```bash
@@ -53,8 +57,8 @@ On your PS4:
 
 
 
-It will appear to download the newest version, but after install it should downgrade to **1.53**.
-
+if its successfully downgraded but you get a "forced update message",**if you already have a jailbreak** FTP into /user/download/CUSA00XXX (whichever region you are in)
+and rename "download0_info.dat" to "download0_info0.dat"
 
 ---
 
