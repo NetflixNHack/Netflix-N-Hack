@@ -82,8 +82,8 @@ def request(flow: http.HTTPFlow) -> None:
         
         elif nflix_cusas[1] in flow.request.pretty_url and ".json" in flow.request.pretty_url:
             logger.info(f"[REDIRECT][CUSA00129] {flow.request.pretty_url}")
-            logger.info(f"        -> {US_redirect}")
-            flow.request.url = US_redirect
+            logger.info(f"        -> {US_REDIRECT}")
+            flow.request.url = US_REDIRECT
             
         elif nflix_cusas[2] in flow.request.pretty_url and ".json" in flow.request.pretty_url:
             logger.info(f"[REDIRECT][CUSA02988] {flow.request.pretty_url}")
