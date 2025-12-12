@@ -1,0 +1,23 @@
+services:
+  mitm:
+    image: mitmproxy/mitmproxy:latest
+    container_name: mitm
+    restart: unless-stopped
+    # mount the repository root into the container so proxy.py, hosts.txt, inject.js are visible
+    volumes:
+      - ./:/home/mitmproxy/addon
+      - mitmproxy-data:/home/mitmproxy/.mitmproxy
+    ports:
+#      - "8080:8080"
+      - "127.0.0.1:8080:8080"
+    command: >
+      mitmdump -s /home/mitmproxy/addon/proxy.py --listen-host 0.0.0.0 --listen-port 8080 --set block_global=false -v
+    # in docker-compose.yml under your service:
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  mitmproxy-data:
