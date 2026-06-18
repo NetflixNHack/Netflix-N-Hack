@@ -19,6 +19,7 @@ let SYSCALL = {
     setuid: 0x17n,
     getuid: 0x18n,
     accept: 0x1en,
+    kill : 0x25n,
     pipe: 0x2an,
     mprotect: 0x4an,
 
@@ -1759,7 +1760,8 @@ function main () {
             send_notification("Unsupported FW_VERSION: " + FW_VERSION);
         } else if (compare_version(FW_VERSION, "10.01") > 0) {
             logger.disableWidget();
-            var script_name = "remote_js_loader.js";
+
+            var script_name = "p2jb.js";
             logger.log("loading " + script_name);
             let script = get_script(script_name);
 
@@ -1795,5 +1797,5 @@ function main () {
     }
 }
 
-//ws.init(ip_script, 1337, () => { logger.log("Websocket initiated successfully"); main();});// uncomment this to enable WebSocket logging
+// ws.init(ip_script, 1337, () => { logger.log("Websocket initiated successfully"); main();});// uncomment this to enable WebSocket logging
 main();
