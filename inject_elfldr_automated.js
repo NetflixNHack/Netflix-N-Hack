@@ -1729,7 +1729,9 @@ async function main () {
                 throw new Error("failed to translate sysctl name to mib (" + name + ")");
             }
 
-            if (syscall(SYSCALL.sysctl, mib, 2n, oldp, oldp_len, newp, newp_len) === 0xffffffffffffffffn) {
+            let mib_len = read64(size) / 4n
+
+            if (syscall(SYSCALL.sysctl, mib, mib_len, oldp, oldp_len, newp, newp_len) === 0xffffffffffffffffn) {
                 return false;
             }
 
