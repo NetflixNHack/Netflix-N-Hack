@@ -153,7 +153,7 @@
     }
 
     try {
-        const p2jb_version = "P2JB 2.6 (Y2JB -> NFJB port by wodz69)";
+        const p2jb_version = "P2JB 2.6 (Y2JB -> NFJB port by wodz69) v.90";
 
         const PAGE_SIZE = 0x4000;
 
@@ -193,10 +193,8 @@
         const MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
 
-        const LEAK_CORES = [0, 1, 2, 3];
         const LEAK_SYSCALLS = 0x100000001n;
         const LEAK_FD_MAX = 8192n
-        const LEAK_SYSCALLS_FINAL = 0xFFn;
 
         const SYSCALL_EXTRA = {
             recvmsg: 0x1bn,
@@ -335,6 +333,9 @@
         let saved_mxcsr = 0;
 
         let failcheck_path = null;
+
+        let LEAK_CORES = [0, 1, 2, 3];
+        let LEAK_SYSCALLS_FINAL = 0xFFn;
 
         function my_init_threading() {
             const jmpbuf = malloc(0x60);
@@ -493,6 +494,7 @@
             write64(add_rop_smash_code_store, 0xab0025n);
             real_rbp = addrof(rop_smash(1)) + _cr_stack_offset;
 
+            const POC_ARG = 0x800000000000n;
             let i = 0;
             for (let j = 0; j < Number(num_calls); j++) {
                 fake_rop[i++] = ROP.pop_rax;
@@ -1139,7 +1141,7 @@
             }
 
             if (LEAK_SYSCALLS_FINAL > 0n) {
-                logger.log("launching kqueueex final chain...");
+                logger.log("launching kqueueex final chain len=" + toHex(LEAK_SYSCALLS_FINAL));
                 execute_kqueueex_final_chain(LEAK_SYSCALLS_FINAL);
                 logger.log("kqueueex final chain finished successfully");
             }
@@ -2097,6 +2099,10 @@
 
         logger.log(p2jb_version +" FW: " + FW_VERSION);
 
+        if (compare_version(FW_VERSION, "12.0") >= 0) {
+            LEAK_CORES = [0, 1];
+        }
+
         ensure_kernel_offset();
 
         my_init_threading();
@@ -2124,7 +2130,7 @@
             case 1: eta_minutes = 120; break;
             case 2: eta_minutes = 70; break;
             case 3: eta_minutes = 60; break;
-            case 4: eta_minutes = 50; break;
+            case 4: eta_minutes = 45; break;
             default: eta_minutes = Math.round(48 * 4 / leak_nw); break;
         }
         const eta_str =  eta_minutes + " min";
