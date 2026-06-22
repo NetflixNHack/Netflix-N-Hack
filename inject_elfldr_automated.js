@@ -1729,7 +1729,7 @@ async function main () {
                 throw new Error("failed to translate sysctl name to mib (" + name + ")");
             }
 
-            let mib_len = read64(size) / 4n
+            let mib_len = read64_uncompressed(size) / 4n;
 
             if (syscall(SYSCALL.sysctl, mib, mib_len, oldp, oldp_len, newp, newp_len) === 0xffffffffffffffffn) {
                 return false;
@@ -1770,7 +1770,10 @@ async function main () {
         var kernel = { addr: {}, read_buffer: null, write_buffer: null };
         var kernel_offset = null;
 
-        if (compare_version(FW_VERSION, "12.40") > 0) {
+        if (FW_VERSION === null) {
+            logger.log("Unable to read FW_VERSION, not attempting a jailbreak");
+            send_notification("Unable to read FW_VERSION, not attempting a jailbreak");
+        } else  if (compare_version(FW_VERSION, "12.40") > 0) {
             logger.log("Unsupported FW_VERSION: " + FW_VERSION);
             send_notification("Unsupported FW_VERSION: " + FW_VERSION);
         } else if (compare_version(FW_VERSION, "10.01") > 0) {
