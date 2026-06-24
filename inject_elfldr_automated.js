@@ -199,7 +199,7 @@ const ws = {
     },
     close() {
         if (this.is_open()) {
-            this.socket.close()
+            this.socket.close();
         }
     },
 };
@@ -1778,6 +1778,14 @@ async function main () {
             send_notification("Unsupported FW_VERSION: " + FW_VERSION);
         } else if (compare_version(FW_VERSION, "10.01") > 0) {
             // logger.disableWidget();
+
+            const logger_log_orig = logger.log.bind(logger);
+            logger.log = function(msg) {
+                logger_log_orig(msg);
+                if (!_cr_caching_active) {
+                    nanosleep_ms(5);
+                }
+            };
 
             var script_name = "p2jb.js";
             logger.log("loading " + script_name);

