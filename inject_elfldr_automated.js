@@ -605,17 +605,11 @@ function sleep(ms) {
     nrdp.setTimeout(() => {}, ms);
 }
 
-async function main () {
+function main () {
 
     logger.init();
 
     logger.log("=== Netflix n Hack ===");
-
-    await nrdp.gibbon.garbageCollect();
-    await nrdp.gibbon.garbageCollect();
-    await nrdp.gibbon.garbageCollect();
-    await nrdp.gibbon.garbageCollect();
-
     logger.flush(); // Force immediate display
 
     try {
