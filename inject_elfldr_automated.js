@@ -189,11 +189,19 @@ const ws = {
         this.socket = new nrdp.WebSocket(`wss://pwn.netflix.com:${port}`);
         this.socket.onopen = callback;
     },
+    is_open() {
+        return this.socket && this.socket.readyState !== this.socket.CLOSED;
+    },
     send(msg) {
-        if (this.socket && this.socket.readyState !== this.socket.CLOSED) {
+        if (this.is_open()) {
             this.socket.send(msg);
         }
-    }
+    },
+    close() {
+        if (this.is_open()) {
+            this.socket.close();
+        }
+    },
 };
 // #endregion
 // #region Logger
@@ -542,48 +550,47 @@ class gadgets {
 };
 
 function hook_tryagain(){
-        /***** Hook "Try Again" button to reload exploit *****/
-        if (typeof util !== 'undefined' && util.changeLocation) {
-            const original_changeLocation = util.changeLocation;
-            util.changeLocation = function(url) {
-                logger.log("Reloading Javascript...");
+    /***** Hook "Try Again" button to reload exploit *****/
+    if (typeof util !== 'undefined' && util.changeLocation) {
+        const original_changeLocation = util.changeLocation;
+        util.changeLocation = function(url) {
+            logger.log("Reloading Javascript...");
 
+            logger.flush();
+            ws.close();
+
+            // Load and eval our injected script instead of reloading app
+            nrdp.gibbon.load({
+                url: 'http://127.0.0.1:40002/js/common/config/text/config.text.lruderrorpage.en.js',
+                secure: false
+            }, function(result) {
                 logger.flush();
 
-                // Load and eval our injected script instead of reloading app
-                nrdp.gibbon.load({
-                    url: 'http://127.0.0.1:40002/js/common/config/text/config.text.lruderrorpage.en.js',
-                    secure: false
-                }, function(result) {
+                if (result.data) {
                     logger.flush();
-
-                    if (result.data) {
-                        logger.flush();
-                        try {
-                            eval(result.data);
-                        } catch (e) {
-                            logger.log("Eval error: " + e.message);
-                            logger.log("Stack: " + (e.stack || "none"));
-                            logger.flush();
-                        }
-                    } else {
-                        logger.log("Load failed - no data received");
+                    try {
+                        eval(result.data);
+                    } catch (e) {
+                        logger.log("Eval error: " + e.message);
+                        logger.log("Stack: " + (e.stack || "none"));
                         logger.flush();
                     }
-                });
+                } else {
+                    logger.log("Load failed - no data received");
+                    logger.flush();
+                }
+            });
 
-                // Throw exception to stop execution and prevent state.exit
-                throw new Error("Exploit reload initiated");
-            };
-            logger.log("Enabled Instant JS reload...");
-            logger.flush();
-        } else {
-            logger.log("WARNING: util.changeLocation not found!");
-            logger.flush();
-        }
+            // Throw exception to stop execution and prevent state.exit
+            throw new Error("Exploit reload initiated");
+        };
+        logger.log("Enabled Instant JS reload...");
+        logger.flush();
+    } else {
+        logger.log("WARNING: util.changeLocation not found!");
+        logger.flush();
     }
-
-
+}
 
 function stringToBytes (str) {
     const len = str.length;
@@ -1659,74 +1666,36 @@ function main () {
             return script_str;
         }
 
-        function is_jailbroken() {
-            const cur_uid = syscall(SYSCALL.getuid);
-            const is_in_sandbox = syscall(SYSCALL.is_in_sandbox);
-            if (cur_uid === 0n && is_in_sandbox === 0n) {
-                return true;
-            } else {
-
-                // Check if elfldr is running at 9021
-                const sockaddr_in = malloc(16);
-                const enable = malloc(4);
-
-                const sock_fd = syscall(SYSCALL.socket, AF_INET, SOCK_STREAM, 0n);
-                if (sock_fd === 0xffffffffffffffffn) {
-                    throw new Error("socket failed: " + hex(sock_fd));
-                }
-
-                try {
-                    write32_uncompressed(enable, 1);
-                    syscall(SYSCALL.setsockopt, sock_fd, SOL_SOCKET, SO_REUSEADDR, enable, 4n);
-
-                    write8_uncompressed(sockaddr_in + 1n, AF_INET);
-                    write16_uncompressed(sockaddr_in + 2n, 0x3D23n);      // port 9021
-                    write32_uncompressed(sockaddr_in + 4n, 0x0100007Fn);  // 127.0.0.1
-
-                    // Try to connect to 127.0.0.1:9021
-                    const ret = syscall(SYSCALL.connect, sock_fd, sockaddr_in, 16n);
-
-                    if (ret === 0n) {
-                        syscall(SYSCALL.close, sock_fd);
-                        return true;
-                    } else {
-                        syscall(SYSCALL.close, sock_fd);
-                        return false;
-                    }
-                } catch (e) {
-                    syscall(SYSCALL.close, sock_fd);
-                    return false;
-                }
-            }
-        }
-
-        function sysctlbyname(name, oldp, oldp_len, newp, newp_len) {
-            const translate_name_mib = malloc(0x8);
-            const buf_size = 0x70;
-            const mib = malloc(buf_size);
-            const size = malloc(0x8);
-
-            write64_uncompressed(translate_name_mib, 0x300000000n);
-            write64_uncompressed(size, BigInt(buf_size));
-
-            const name_addr = alloc_string(name);
-            const name_len = BigInt(name.length);
-
-            if (syscall(SYSCALL.sysctl, translate_name_mib, 2n, mib, size, name_addr, name_len) === 0xffffffffffffffffn) {
-                throw new Error("failed to translate sysctl name to mib (" + name + ")");
-            }
-
-            if (syscall(SYSCALL.sysctl, mib, 2n, oldp, oldp_len, newp, newp_len) === 0xffffffffffffffffn) {
-                return false;
-            }
-
-            return true;
-        }
-
-        function get_fwversion() {
+        function _check_fw_version() {
             const buf = malloc(0x8);
             const size = malloc(0x8);
             write64_uncompressed(size, 0x8n);
+
+            function sysctlbyname(name, oldp, oldp_len, newp, newp_len) {
+                const translate_name_mib = malloc(0x8);
+                const buf_size = 0x70;
+                const mib = malloc(buf_size);
+                const size = malloc(0x8);
+
+                write64_uncompressed(translate_name_mib, 0x300000000n);
+                write64_uncompressed(size, BigInt(buf_size));
+
+                const name_addr = alloc_string(name);
+                const name_len = BigInt(name.length);
+
+                if (syscall(SYSCALL.sysctl, translate_name_mib, 2n, mib, size, name_addr, name_len) === 0xffffffffffffffffn) {
+                    throw new Error("failed to translate sysctl name to mib (" + name + ")");
+                }
+
+                let mib_len = read64_uncompressed(size) / 4n;
+
+                if (syscall(SYSCALL.sysctl, mib, mib_len, oldp, oldp_len, newp, newp_len) === 0xffffffffffffffffn) {
+                    return false;
+                }
+
+                return true;
+            }
+
 
             if (sysctlbyname("kern.sdk_version", buf, size, 0n, 0n)) {
                 const byte1 = Number(read8_uncompressed(buf + 2n));  // Minor version (first byte)
@@ -1739,7 +1708,7 @@ function main () {
             return null;
         }
 
-        function compare_version(a, b) {
+        function _compare_fw_ver(a, b) {
             const [amaj, amin] = a.split('.').map(Number);
             const [bmaj, bmin] = b.split('.').map(Number);
             return amaj === bmaj ? amin - bmin : amaj - bmaj;
@@ -1747,7 +1716,7 @@ function main () {
 
         /***** Let's trigger Jailbreak *****/
 
-        FW_VERSION = get_fwversion();
+        FW_VERSION = _check_fw_version();
 
         prefetch_scratch = malloc(256);
         script_scratch = malloc(512*1024);
@@ -1755,11 +1724,14 @@ function main () {
         var kernel = { addr: {}, read_buffer: null, write_buffer: null };
         var kernel_offset = null;
 
-        if (compare_version(FW_VERSION, "12.40") > 0) {
+        if (FW_VERSION === null) {
+            logger.log("Unable to read FW_VERSION, not attempting a jailbreak");
+            send_notification("Unable to read FW_VERSION, not attempting a jailbreak");
+        } else  if (_compare_fw_ver(FW_VERSION, "12.40") > 0) {
             logger.log("Unsupported FW_VERSION: " + FW_VERSION);
             send_notification("Unsupported FW_VERSION: " + FW_VERSION);
-        } else if (compare_version(FW_VERSION, "10.01") > 0) {
-            logger.disableWidget();
+        } else if (_compare_fw_ver(FW_VERSION, "10.01") > 0) {
+            // logger.disableWidget();
 
             var script_name = "p2jb.js";
             logger.log("loading " + script_name);
@@ -1784,6 +1756,49 @@ function main () {
             logger.flush();
         }
 
+        if (typeof is_jailbroken === 'undefined') {
+            var is_jailbroken = function() {
+                const cur_uid = syscall(SYSCALL.getuid);
+                const is_in_sandbox = syscall(SYSCALL.is_in_sandbox);
+                if (cur_uid === 0n && is_in_sandbox === 0n) {
+                    return true;
+                } else {
+
+                    // Check if elfldr is running at 9021
+                    const sockaddr_in = malloc(16);
+                    const enable = malloc(4);
+
+                    const sock_fd = syscall(SYSCALL.socket, AF_INET, SOCK_STREAM, 0n);
+                    if (sock_fd === 0xffffffffffffffffn) {
+                        throw new Error("socket failed: " + hex(sock_fd));
+                    }
+
+                    try {
+                        write32_uncompressed(enable, 1);
+                        syscall(SYSCALL.setsockopt, sock_fd, SOL_SOCKET, SO_REUSEADDR, enable, 4n);
+
+                        write8_uncompressed(sockaddr_in + 1n, AF_INET);
+                        write16_uncompressed(sockaddr_in + 2n, 0x3D23n);      // port 9021
+                        write32_uncompressed(sockaddr_in + 4n, 0x0100007Fn);  // 127.0.0.1
+
+                        // Try to connect to 127.0.0.1:9021
+                        const ret = syscall(SYSCALL.connect, sock_fd, sockaddr_in, 16n);
+
+                        if (ret === 0n) {
+                            syscall(SYSCALL.close, sock_fd);
+                            return true;
+                        } else {
+                            syscall(SYSCALL.close, sock_fd);
+                            return false;
+                        }
+                    } catch (e) {
+                        syscall(SYSCALL.close, sock_fd);
+                        return false;
+                    }
+                }
+            };
+        }
+
         if (!is_jailbroken()) {
             send_notification("Jailbreak didn't succeed. Reboot and Try again!");
             throw new Error("Jailbreak didn't succeed");
@@ -1797,5 +1812,12 @@ function main () {
     }
 }
 
-// ws.init(ip_script, 1337, () => { logger.log("Websocket initiated successfully"); main();});// uncomment this to enable WebSocket logging
-main();
+const enable_websocket_logging = true;
+if (enable_websocket_logging && !ws.is_open()) {
+    ws.init(ip_script, 1337, () => {
+        logger.log("Websocket initiated successfully");
+        main();
+    });
+} else {
+    main();
+}

