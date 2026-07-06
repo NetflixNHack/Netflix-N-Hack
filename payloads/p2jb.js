@@ -194,8 +194,8 @@
         const MAIN_CORE = 4;
         const MAIN_RTPRIO = 256;
 
-        const LEAK_UCRED_REF_FLOOR_ESTIMATE = 108n; // NF v6.000.000 PS5 (Disc-FAT) FW 11.20
-        const LEAK_UCRED_REF_OFFSET = 20n; // increase in increments of 10 if JB fails with "stage0: race failed after 96 attempts"; decrease if it KPs before reaching stage0
+        const LEAK_UCRED_REF_FLOOR_ESTIMATE = 108n; // NF v6.000.000 PS5 (Disc-FAT) FW 11.20, no disc in the drive
+        const LEAK_UCRED_REF_OFFSET = 30n; // increase in increments of 10 if JB fails with "stage0: race failed after 96 attempts"; decrease if it KPs before reaching stage0
 
         const SYSCALL_EXTRA = {
             recvmsg: 0x1bn,
