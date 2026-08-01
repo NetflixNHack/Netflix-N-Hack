@@ -232,8 +232,8 @@ async function elf_loader() {
         logger.log("Loading elfldr.elf from proxy");
         logger.flush();
 
-        const elf_data = malloc(400*1024);
-        let elf_size = fetch_file("elfldr.elf", elf_data);
+        const elf_data = malloc(500*1024);
+        let elf_size = fetch_file("elfldr.elf", elf_data, 500*1024);
 
         if(elf_size < 1000) {
             throw new Error("Something went wrong while reading elfldr.elf");
